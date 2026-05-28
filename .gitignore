@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+.pytest_cache/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# LaTeX build artifacts
+*.aux
+*.bbl
+*.blg
+*.fdb_latexmk
+*.fls
+*.log
+*.nav
+*.out
+*.snm
+*.synctex.gz
+*.toc
+
+# Archives and generated dumps
+*.zip
+results.zip
+
+# Generated frame folders and bulky raw assets
+slides/assets/
+slides/windows_assets/
+raw/
+bags/
+
+# OS metadata
+.DS_Store
+Thumbs.db

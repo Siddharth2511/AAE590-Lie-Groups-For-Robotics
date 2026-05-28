@@ -1,0 +1,966 @@
+\documentclass{aiaa-tc}
+
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{bm}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage{url}
+
+\graphicspath{{figures/}}
+
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\SO}{\mathrm{SO}}
+\newcommand{\SE}{\mathrm{SE}}
+\newcommand{\SEtwo}{\mathrm{SE}_2(3)}
+\newcommand{\Exp}{\operatorname{Exp}}
+\newcommand{\Log}{\operatorname{Log}}
+\newcommand{\diag}{\operatorname{diag}}
+\newcommand{\N}{\mathcal{N}}
+\newcommand{\V}{\mathcal{V}}
+\newcommand{\T}{\mathsf{T}}
+\newcommand{\dd}{\mathrm{d}}
+
+\title{Particle Filtering with Lie-Group Camera Projection for Online Multi-Camera UAV Tracking}
+
+\author{Siddharth Anand\thanks{M.S. Student, School of Aeronautics and Astronautics, Purdue University, West Lafayette, IN.}}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+This paper studies online tracking of a small unmanned aerial vehicle using
+multiple calibrated external cameras.  The implemented estimator compares a
+MEKF-style error-state extended Kalman filter, an iterated EKF, their gated
+variants, and a bootstrap particle filter.  All filters use the same
+Lie-group camera model: a world point is transformed by a calibrated
+\(\SE(3)\) camera extrinsic and projected through a pinhole intrinsic matrix.
+Monte Carlo simulations in a Gazebo/Purdue-world style camera geometry show
+that the EKF variants are fastest and most accurate in the nearly unimodal
+nominal cases, while the particle filter is more appropriate when the visual
+posterior is multimodal.  A candidate-set experiment demonstrates this regime:
+the particle filter achieves \(0.186\) m RMSE, compared with \(0.319\) m for
+the best gated EKF baseline, because it marginalizes over multiple plausible
+detections instead of committing to a single association.  A hardware-calibration
+hypothesis test is also performed by replaying an extracted PURT motion in
+simulation while injecting camera intrinsic and extrinsic errors.  The ablation
+shows that using a mismatched \(1600\times 1200\) intrinsic matrix on
+\(640\times 480\) images, or treating an active-marker body frame as an optical
+camera frame, can reproduce multi-meter particle-filter errors.  Finally, a
+future extension is formulated in which each particle carries a latent
+\(\SE_2(3)\) inertial-navigation state so that body-frame acceleration readings
+enter the prediction step through the \(\SO(3)\) exponential map and group
+action, while the reported output remains the UAV trajectory.
+\end{abstract}
+
+\section*{Nomenclature}
+
+\begin{tabular}{ll}
+\(p_{w,k}\) & UAV position in the world frame at time index \(k\) \\
+\(v_{w,k}\) & UAV velocity in the world frame at time index \(k\) \\
+\(z_{j,k}\) & Pixel measurement from camera \(j\) at time index \(k\) \\
+\(K_j\) & Intrinsic matrix of camera \(j\) \\
+\(T_{j,cw}\) & World-to-camera extrinsic transform for camera \(j\), an element of \(\SE(3)\) \\
+\(R_{j,cw},t_{j,cw}\) & Rotation and translation blocks of \(T_{j,cw}\) \\
+\(\pi(\cdot)\) & Pinhole camera projection map \\
+\(N_p\) & Number of particles in the particle filter \\
+\(w_k^{(i)}\) & Weight of particle \(i\) at time index \(k\) \\
+\(\omega_{m,k}\) & Body-frame gyroscope measurement \\
+\(a_{m,k}\) & Body-frame accelerometer measurement or specific force \\
+\(R_{wb,k}\) & Body-to-world attitude of the UAV \\
+\(\V_k\) & Set of cameras with valid detections at time index \(k\)
+\end{tabular}
+
+\section{Introduction}
+
+External vision sensors are attractive for tracking small UAVs in laboratory,
+urban-canyon, and GPS-denied settings, including Purdue urban-canyon style
+external-vision work \cite{yang2022}.  A multi-camera system can provide
+multiple simultaneous bearing-like measurements, but its accuracy depends on
+camera intrinsics, camera-to-world extrinsics, image timing, and detector
+quality.  The estimator must also handle missing views, noisy detections, and
+ambiguous visual associations.
+
+This project investigates such a system in the context of online UAV trajectory
+estimation.  The current implemented state is position and velocity,
+\[
+x_k =
+\begin{bmatrix}
+p_{w,k}\\
+v_{w,k}
+\end{bmatrix}
+\in \R^6,
+\]
+while the camera model is written using \(\SE(3)\) transformations.  The
+implemented filters are a MEKF-style error-state EKF, an iterated EKF (ItEKF),
+gated versions of both EKF variants, and a bootstrap particle filter (PF).
+Particle filters are emphasized because they can represent non-Gaussian and
+multimodal posteriors \cite{thrun2005}, which are natural in camera-based
+tracking when detections are ambiguous.
+
+The paper has four objectives.  First, it presents the common Lie-group
+projection model used by all filters.  Second, it compares the EKF-style
+estimators and PF in controlled Monte Carlo simulations.  Third, it identifies
+a regime in which PF is the more appropriate estimator: ambiguous candidate-set
+measurements.  Fourth, it reproduces a hardware failure hypothesis in
+simulation by injecting camera calibration errors observed in a PURT hardware
+data collection.  A proposed extension then moves more Lie-group structure into
+the PF prediction step by carrying latent attitude and using body-frame
+acceleration readings.
+
+\section{Problem Formulation}
+
+\subsection{Online Multi-Camera Tracking Task}
+
+At each time \(k\), the estimator receives detections from up to \(N_c\)
+calibrated cameras.  The objective of the implemented system is to estimate
+\(p_{w,k}\), with \(v_{w,k}\) carried to improve prediction between camera
+updates.  The camera detections are two-dimensional pixel measurements; the
+filters do not receive ground-truth 3D position during online operation.
+
+The controlled simulation uses a \(12\) s trajectory with time step
+\(\Delta t=0.05\) s, \(N_p=450\) particles for the baseline PF, and \(12\)
+Monte Carlo runs per scenario.  The main scenarios are summarized in
+Table~\ref{tab:scenarios}.  The final stress case includes missing camera
+detections and false detections, and is kept as a transparency check with both
+ungated and gated EKF variants.
+
+\begin{table}[htbp]
+\centering
+\caption{Monte Carlo scenarios used for the filter comparison.}
+\label{tab:scenarios}
+\begin{tabular}{lcccc}
+\toprule
+Scenario & Pixel noise [px] & Initial position offset [m] & Dropout & False detections \\
+\midrule
+Nominal & 8 & \([0.7,-0.5,0.25]\) & 0.00 & 0.00 \\
+Poor initialization & 8 & \([2.5,-2.0,0.9]\) & 0.00 & 0.00 \\
+High noise & 22 & \([0.9,-0.7,0.25]\) & 0.00 & 0.00 \\
+Dropout stress & 12 & \([1.0,-0.8,0.35]\) & 0.18 & 0.06 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Lie-Group Camera Projection}
+
+For camera \(j\), the world-to-camera extrinsic is
+\[
+T_{j,cw}
+=
+\begin{bmatrix}
+R_{j,cw} & t_{j,cw}\\
+0 & 1
+\end{bmatrix}
+\in \SE(3).
+\]
+For a world-frame point \(p_{w,k}\), define the homogeneous point
+\[
+\bar p_{w,k} =
+\begin{bmatrix}
+p_{w,k}\\
+1
+\end{bmatrix}.
+\]
+The point is transformed into camera coordinates by the \(\SE(3)\) action
+\[
+\bar p_{j,c,k} = T_{j,cw}\bar p_{w,k},
+\qquad
+p_{j,c,k} =
+\begin{bmatrix}
+X_{j,c,k}\\
+Y_{j,c,k}\\
+Z_{j,c,k}
+\end{bmatrix}.
+\]
+The predicted pixel location is
+\[
+\hat z_{j,k}
+=
+h_j(x_k)
+=
+\pi(K_j,T_{j,cw}\bar p_{w,k}),
+\]
+where
+\[
+\pi(K_j,p_{j,c,k})
+=
+\begin{bmatrix}
+f_{x,j}X_{j,c,k}/Z_{j,c,k}+c_{x,j}\\
+f_{y,j}Y_{j,c,k}/Z_{j,c,k}+c_{y,j}
+\end{bmatrix}.
+\]
+The measurement model is
+\[
+z_{j,k}
+=
+h_j(x_k)+n_{j,k},
+\qquad
+n_{j,k}\sim \N(0,R_j).
+\]
+
+This is the primary Lie-group component of the implemented filters: camera
+extrinsics are represented as \(\SE(3)\) elements, and all filters use the same
+world-to-camera action before applying the nonlinear projection map familiar
+from multiple-view geometry \cite{hartley2004}.
+
+\section{Implemented Filters}
+
+\subsection{Shared Prediction Model}
+
+The implemented Monte Carlo comparison uses a constant-velocity process model:
+\[
+x_{k+1} =
+F_k x_k + q_k,
+\qquad
+F_k =
+\begin{bmatrix}
+I_3 & \Delta t I_3\\
+0 & I_3
+\end{bmatrix}.
+\]
+Equivalently,
+\[
+p_{w,k+1}=p_{w,k}+\Delta t\,v_{w,k}+q_{p,k},
+\qquad
+v_{w,k+1}=v_{w,k}+q_{v,k}.
+\]
+Because \(x_k\in \R^6\), the prediction state is an additive abelian group.
+Writing this portion in Lie-group notation does not change the implemented
+equations.  The nontrivial implemented Lie-group component is therefore the
+\(\SE(3)\) camera measurement model above.
+
+\subsection{MEKF-Style EKF}
+
+The MEKF-style filter propagates a mean \(\hat x_k\) and covariance \(P_k\).
+The predicted covariance is
+\[
+P^-_k = F_k P_{k-1}F_k^\T + Q_k.
+\]
+For a valid camera \(j\), the residual is
+\[
+r_{j,k}=z_{j,k}-h_j(\hat x^-_k).
+\]
+The projection Jacobian with respect to \(p_w\) is
+\[
+J_{\pi,j,k} =
+\begin{bmatrix}
+f_{x,j}/Z & 0 & -f_{x,j}X/Z^2\\
+0 & f_{y,j}/Z & -f_{y,j}Y/Z^2
+\end{bmatrix},
+\]
+where \(p_{j,c,k}=[X,Y,Z]^\T\).  Thus
+\[
+H_{j,k} =
+\begin{bmatrix}
+J_{\pi,j,k}R_{j,cw} & 0_{2\times 3}
+\end{bmatrix}.
+\]
+Stacking all valid cameras gives \(r_k\), \(H_k\), and \(R_k\).  The correction
+is
+\[
+S_k = H_kP^-_kH_k^\T+R_k,
+\qquad
+K_k=P^-_kH_k^\T S_k^{-1},
+\]
+\[
+\hat x_k=\hat x^-_k+K_kr_k,
+\]
+with the Joseph covariance update used for numerical robustness.
+
+\subsection{Iterated EKF and Gated Variants}
+
+The ItEKF uses the same prediction and camera model, but repeatedly
+relinearizes \(h(\cdot)\) around the current update estimate.  At iteration
+\(\ell\),
+\[
+\hat z_k^{(\ell)}=h(\hat x_k^{(\ell)}),
+\qquad
+H_k^{(\ell)}=
+\left.\frac{\partial h}{\partial x}\right|_{\hat x_k^{(\ell)}}.
+\]
+The iterated residual is
+\[
+\tilde r_k^{(\ell)}
+=
+z_k-h(\hat x_k^{(\ell)})
++H_k^{(\ell)}(\hat x_k^{(\ell)}-\hat x^-_k),
+\]
+and the update is
+\[
+\hat x_k^{(\ell+1)}
+=
+\hat x^-_k+
+K_k^{(\ell)}\tilde r_k^{(\ell)}.
+\]
+The gated variants reject a camera update when its Mahalanobis distance exceeds
+a selected threshold:
+\[
+r_{j,k}^{\T}S_{j,k}^{-1}r_{j,k}>\gamma.
+\]
+This is a measurement-validation stage, not a dropout fix: if a camera does not
+provide a measurement, both gated and ungated variants simply skip that camera.
+
+\subsection{Bootstrap Particle Filter}
+
+The PF represents the posterior by weighted samples
+\[
+\mathcal X_k =
+\left\{
+x_k^{(i)}, w_k^{(i)}
+\right\}_{i=1}^{N_p},
+\qquad
+x_k^{(i)}=
+\begin{bmatrix}
+p_{w,k}^{(i)}\\
+v_{w,k}^{(i)}
+\end{bmatrix}.
+\]
+Particles are predicted through the same constant-velocity model with sampled
+process noise.  For each valid camera,
+\[
+\hat z_{j,k}^{(i)}
+=
+\pi(K_j,T_{j,cw}\bar p_{w,k}^{(i)}),
+\qquad
+r_{j,k}^{(i)}
+=
+z_{j,k}-\hat z_{j,k}^{(i)}.
+\]
+The particle likelihood is
+\[
+\ell_k^{(i)}
+=
+\prod_{j\in\V_k}
+\N(r_{j,k}^{(i)};0,R_j),
+\]
+with a robust likelihood floor in contaminated measurement cases.  The weights
+are updated by
+\[
+w_k^{(i)}
+\propto
+w_{k|k-1}^{(i)}\ell_k^{(i)},
+\qquad
+\sum_i w_k^{(i)}=1.
+\]
+Particles are resampled with probability \(w_k^{(i)}\), and the reported
+trajectory estimate is
+\[
+\hat p_{w,k}
+=
+\sum_{i=1}^{N_p}w_k^{(i)}p_{w,k}^{(i)}.
+\]
+
+\section{Simulation Results}
+
+\subsection{Trajectory and Visual Setup}
+
+Figure~\ref{fig:trajectory} shows the simulated top-view trajectory and camera
+layout used for the controlled comparison.  The same geometry is used by all
+filters, and all filters receive the same generated detections.
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=0.78\linewidth]{trajectory_top_view.png}
+\caption{Top-view simulated trajectory and external-camera layout used in the controlled Monte Carlo comparison.}
+\label{fig:trajectory}
+\end{figure}
+
+\subsection{Filter Accuracy and Runtime}
+
+Table~\ref{tab:main-results} reports RMSE, 90th percentile error, and mean
+runtime per step.  The MEKF and ItEKF have nearly identical accuracy in nominal
+and high-noise cases because the posterior remains close to unimodal.  The
+ItEKF is more expensive because it repeatedly relinearizes the projection
+model.  The PF is slower than the EKFs at the baseline \(450\) particles and is
+not the most accurate in easy cases, but it provides a sampled posterior that
+becomes valuable when measurements are ambiguous.
+
+\begin{table}[htbp]
+\centering
+\caption{Main Monte Carlo comparison.  Runtime is mean step time.}
+\label{tab:main-results}
+\scriptsize
+\begin{tabular}{llccc}
+\toprule
+Scenario & Filter & RMSE [m] & P90 [m] & Runtime [ms] \\
+\midrule
+Nominal & MEKF & 0.153 & 0.221 & 0.170 \\
+Nominal & ItEKF & 0.153 & 0.221 & 0.489 \\
+Nominal & MEKF-gated & 0.154 & 0.223 & 0.348 \\
+Nominal & ItEKF-gated & 0.154 & 0.222 & 1.017 \\
+Nominal & PF & 0.183 & 0.265 & 1.039 \\
+\midrule
+Poor initialization & MEKF & 0.155 & 0.224 & 0.179 \\
+Poor initialization & ItEKF & 0.155 & 0.224 & 0.480 \\
+Poor initialization & MEKF-gated & 0.156 & 0.226 & 0.347 \\
+Poor initialization & ItEKF-gated & 0.155 & 0.225 & 1.008 \\
+Poor initialization & PF & 0.215 & 0.304 & 1.026 \\
+\midrule
+High noise & MEKF & 0.346 & 0.506 & 0.207 \\
+High noise & ItEKF & 0.347 & 0.508 & 0.567 \\
+High noise & MEKF-gated & 0.347 & 0.511 & 0.388 \\
+High noise & ItEKF-gated & 0.349 & 0.513 & 1.168 \\
+High noise & PF & 0.446 & 0.651 & 1.142 \\
+\midrule
+Dropout stress & MEKF & 0.539 & 0.830 & 0.193 \\
+Dropout stress & ItEKF & 0.542 & 0.828 & 0.540 \\
+Dropout stress & MEKF-gated & 0.248 & 0.361 & 0.363 \\
+Dropout stress & ItEKF-gated & 0.249 & 0.362 & 1.048 \\
+Dropout stress & PF & 0.317 & 0.465 & 1.075 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[htbp]
+\centering
+\begin{minipage}{0.48\linewidth}
+\centering
+\includegraphics[width=\linewidth]{rmse_bar.png}
+\end{minipage}
+\hfill
+\begin{minipage}{0.48\linewidth}
+\centering
+\includegraphics[width=\linewidth]{runtime_bar.png}
+\end{minipage}
+\caption{RMSE and computation-time comparison across implemented filter variants.}
+\label{fig:rmse-runtime}
+\end{figure}
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=0.88\linewidth]{time_error_comparison.png}
+\caption{Representative time history of position error for the simulated comparison.}
+\label{fig:time-error}
+\end{figure}
+
+\subsection{Particle Count Sensitivity}
+
+The PF improves as the particle count increases, but the improvement saturates
+in mostly unimodal cases while runtime grows.  Table~\ref{tab:particle-sweep}
+shows the dropout stress sweep.  Increasing from \(450\) to \(14400\) particles
+improves RMSE from \(0.317\) m to \(0.287\) m, while runtime rises from
+\(0.897\) ms to \(14.055\) ms per step.  This supports the interpretation that
+PF should not be claimed as universally superior by simply increasing particle
+count; its strength is the ability to represent non-Gaussian uncertainty.
+
+\begin{table}[htbp]
+\centering
+\caption{PF particle-count sweep in the dropout stress case.}
+\label{tab:particle-sweep}
+\begin{tabular}{rrrr}
+\toprule
+Particles & RMSE [m] & P90 [m] & Runtime [ms] \\
+\midrule
+225 & 0.319 & 0.459 & 0.684 \\
+450 & 0.317 & 0.465 & 0.897 \\
+900 & 0.296 & 0.434 & 1.319 \\
+1800 & 0.292 & 0.431 & 2.065 \\
+3600 & 0.289 & 0.419 & 4.167 \\
+7200 & 0.288 & 0.419 & 7.747 \\
+14400 & 0.287 & 0.415 & 14.055 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=0.72\linewidth]{pf_particle_sweep.png}
+\caption{PF particle-count sensitivity.  More particles reduce sampling error but increase runtime.}
+\label{fig:particle-sweep}
+\end{figure}
+
+\section{A Case Where PF Is Preferable}
+
+The most favorable case for PF is not a simple high-noise Gaussian measurement
+model, but an ambiguous visual association model.  Suppose each camera returns
+a candidate set
+\[
+\mathcal Z_{j,k}
+=
+\{z_{j,k}^{(1)},\ldots,z_{j,k}^{(M_j)}\}.
+\]
+An EKF-style filter generally needs a single association
+\[
+\tilde z_{j,k}=z_{j,k}^{(m^\star)}
+\]
+before applying a Gaussian update.  If \(m^\star\) is wrong, the innovation can
+pull the filter toward the wrong target.  The PF can instead use a mixture
+likelihood:
+\[
+L_{j,k}(x_k^{(i)})
+=
+\epsilon+
+\sum_{m=1}^{M_j}
+\alpha_m
+\N\!\left(
+z_{j,k}^{(m)};
+h_j(x_k^{(i)}),
+R_j
+\right),
+\]
+\[
+w_k^{(i)}
+\propto
+w_{k|k-1}^{(i)}
+\prod_j L_{j,k}(x_k^{(i)}).
+\]
+No candidate label is assigned to a particle.  Instead, each particle is
+weighted by how well it explains any plausible candidate.
+
+Table~\ref{tab:ambiguous} shows that this is the regime where PF clearly wins.
+The candidate-set PF with \(450\) particles achieves \(0.186\) m RMSE, while
+the best gated EKF baseline is \(0.319\) m.  This is the main evidence that PF
+is the natural estimator when the posterior is multimodal.
+
+\begin{table}[htbp]
+\centering
+\caption{Ambiguous candidate-set experiment.}
+\label{tab:ambiguous}
+\begin{tabular}{lccc}
+\toprule
+Filter & RMSE [m] & P90 [m] & Runtime [ms] \\
+\midrule
+MEKF & 0.541 & 0.784 & 0.145 \\
+ItEKF & 0.542 & 0.784 & 0.382 \\
+MEKF-gated & 0.319 & 0.476 & 0.257 \\
+ItEKF-gated & 0.325 & 0.485 & 0.705 \\
+PF-candidates & \textbf{0.186} & \textbf{0.266} & 0.969 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[htbp]
+\centering
+\begin{minipage}{0.48\linewidth}
+\centering
+\includegraphics[width=\linewidth]{ambiguous_candidate_rmse.png}
+\end{minipage}
+\hfill
+\begin{minipage}{0.48\linewidth}
+\centering
+\includegraphics[width=\linewidth]{ambiguous_candidate_error.png}
+\end{minipage}
+\caption{Ambiguous candidate-set case.  The PF uses a mixture likelihood over candidates and maintains multiple hypotheses.}
+\label{fig:ambiguous}
+\end{figure}
+
+\section{Hardware Calibration Hypothesis}
+
+\subsection{Motivation}
+
+A PURT hardware test on April 24, 2026 produced very large raw PF errors.  The
+working hypothesis was that the active-marker rigid body gave a stable QTM
+marker pose, but this pose was not the optical camera pose used by the
+projection model.  In addition, an old \texttt{camera0.yaml} file described a
+\(1600\times1200\) calibration, while the UP camera images used by the tracker
+were \(640\times480\).  Either error corrupts the \(\SE(3)\) projection model.
+
+The hypothesis was tested in simulation by replaying an extracted PURT run-1
+QTM trajectory and generating clean camera measurements from a correct camera
+rig.  The PF was then deliberately run with wrong intrinsics and/or wrong
+extrinsics.  This isolates calibration error from detector quality, ROS timing,
+and QTM parsing.
+
+\subsection{Calibration Ablation}
+
+The correct UP intrinsics were approximately
+\[
+K_{\mathrm{UP}}=
+\begin{bmatrix}
+338.972 & 0 & 320.473\\
+0 & 340.546 & 235.618\\
+0 & 0 & 1
+\end{bmatrix},
+\]
+whereas the erroneous \texttt{camera0.yaml} intrinsic matrix was
+\[
+K_{\mathrm{bad}}=
+\begin{bmatrix}
+847.429 & 0 & 801.181\\
+0 & 851.364 & 589.046\\
+0 & 0 & 1
+\end{bmatrix}.
+\]
+The wrong-extrinsic cases perturb the assumed camera pose as
+\[
+\hat R_{j,wc}
+=
+R_{j,wc}\Exp(\delta\phi_j^\wedge),
+\qquad
+\hat t_{j,wc}
+=
+t_{j,wc}+R_{j,wc}\delta c_j,
+\]
+then convert to world-to-camera form
+\[
+\hat R_{j,cw}=\hat R_{j,wc}^{\T},
+\qquad
+\hat t_{j,cw}
+=
+-\hat R_{j,wc}^{\T}\hat t_{j,wc}.
+\]
+
+Table~\ref{tab:hardware} and Fig.~\ref{fig:hardware-ablation} show that the
+hypothesis is plausible.  The clean case gives \(0.943\) m PF RMSE.  Using only
+\texttt{camera0.yaml} raises the PF RMSE to \(6.654\) m.  A \(15\) deg,
+\(0.35\) m marker-like optical-frame error raises it to \(8.692\) m.  Combining
+the same marker-like error with \texttt{camera0.yaml} gives \(7.650\) m.  Thus
+the calibration failure mode alone is sufficient to reproduce multi-meter
+hardware-scale error in an otherwise clean simulator.
+
+\begin{table}[htbp]
+\centering
+\caption{Hardware calibration hypothesis ablation.}
+\label{tab:hardware}
+\scriptsize
+\begin{tabular}{lccccc}
+\toprule
+Case & Intrinsics & Extrinsic error & PF RMSE [m] & PF P90 [m] & Pixel P90 [px] \\
+\midrule
+Correct & UP & correct & 0.943 & 1.351 & 17.1 \\
+\texttt{camera0.yaml} only & bad & correct & 6.654 & 9.055 & 632.3 \\
+5 deg, 0.10 m & UP & mild & 2.679 & 4.010 & 38.8 \\
+15 deg, 0.35 m & UP & marker-like & 8.692 & 15.089 & 112.1 \\
+25 deg, 0.70 m & UP & severe & 8.331 & 13.671 & 197.6 \\
+15 deg + \texttt{camera0} & bad & marker-like & 7.650 & 10.662 & 738.5 \\
+25 deg + \texttt{camera0} & bad & severe & 7.740 & 11.064 & 847.0 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[htbp]
+\centering
+\begin{minipage}{0.48\linewidth}
+\centering
+\includegraphics[width=\linewidth]{hardware_calibration_ablation_rmse.png}
+\end{minipage}
+\hfill
+\begin{minipage}{0.48\linewidth}
+\centering
+\includegraphics[width=\linewidth]{hardware_calibration_pixel_residual.png}
+\end{minipage}
+\caption{Hardware calibration ablation.  Wrong intrinsics and marker-frame/optical-frame errors produce multi-meter PF errors and large reprojection residuals.}
+\label{fig:hardware-ablation}
+\end{figure}
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=0.95\linewidth]{hardware_hypothesis_pipeline.png}
+\caption{Hardware data in simulation: real ROS-bag snippets, QTM trajectory replay, simulated calibration ablation, and PF error metrics.}
+\label{fig:hardware-pipeline}
+\end{figure}
+
+\begin{figure}[htbp]
+\centering
+\begin{minipage}{0.48\linewidth}
+\centering
+\includegraphics[width=\linewidth]{hardware_purt_camera_layout.png}
+\end{minipage}
+\hfill
+\begin{minipage}{0.38\linewidth}
+\centering
+\includegraphics[width=\linewidth]{hardware_active_marker_camera.jpeg}
+\end{minipage}
+\caption{PURT-style camera layout and hardware camera with marker rig.  The ablation models the effect of confusing the marker frame with the optical camera frame.}
+\label{fig:hardware-layout}
+\end{figure}
+
+\subsection{Practical Hardware Implications}
+
+The hardware result does not prove that calibration was the only issue in the
+real run; timing, detector quality, and marker visibility can still contribute.
+However, the ablation shows that calibration error is sufficient to explain the
+observed error scale.  Before another hardware PF run, QTM marker poses should
+be treated as marker-body poses, not optical camera poses; a fixed
+\(T_{\mathrm{marker},\mathrm{optical}}\) hand-eye transform should be calibrated
+for each camera; and QTM drone positions should be reprojected into each camera
+as a pre-filter sanity check.  If the projected point does not land near the
+detected drone, the filter should not be run yet.
+
+\section{Proposed Body-Frame-Acceleration Lie-Group PF}
+
+The implemented PF is position/velocity based.  To include more Lie-group
+structure in the prediction step, the next extension is to let each particle
+carry a latent inertial-navigation state.  This follows the same motivation as
+invariant filtering, where body-frame inputs and errors are naturally expressed
+on the group \cite{barrau2017}, and connects to particle filtering on Lie
+groups \cite{fpf_lg,chahbazian2023}:
+\[
+X_k^{(i)}
+=
+\left(
+R_{wb,k}^{(i)},v_{w,k}^{(i)},p_{w,k}^{(i)}
+\right)
+\in \SEtwo.
+\]
+The output of interest remains the trajectory \(p_{w,k}\), but \(R_{wb,k}\) is
+carried so that body-frame IMU acceleration can be mapped into world-frame
+motion.
+
+Let the body-frame IMU input be
+\[
+u_k=(\omega_{m,k},a_{m,k}),
+\]
+and sample body-frame process noise
+\[
+\eta_{\omega,k}^{(i)}\sim \N(0,Q_\omega),
+\qquad
+\eta_{a,k}^{(i)}\sim \N(0,Q_a).
+\]
+No IMU bias states are included in this proposed version.  The attitude
+prediction is
+\[
+R_{wb,k+1}^{(i)}
+=
+R_{wb,k}^{(i)}
+\Exp_{SO(3)}
+\left(
+(\omega_{m,k}+\eta_{\omega,k}^{(i)})\Delta t
+\right),
+\]
+where the product is group composition on \(\SO(3)\).  The accelerometer is
+mapped into world frame by
+\[
+a_{w,k}^{(i)}
+=
+R_{wb,k}^{(i)}
+\left(a_{m,k}+\eta_{a,k}^{(i)}\right)
++g_w,
+\]
+with \(g_w\) omitted if \(a_{m,k}\) is already gravity compensated.  The
+velocity and position are then propagated as
+\[
+v_{w,k+1}^{(i)}
+=
+v_{w,k}^{(i)}
++\Delta t\,a_{w,k}^{(i)},
+\]
+\[
+p_{w,k+1}^{(i)}
+=
+p_{w,k}^{(i)}
++\Delta t\,v_{w,k}^{(i)}
++\frac{1}{2}\Delta t^2a_{w,k}^{(i)}.
+\]
+The camera update remains unchanged:
+\[
+\hat z_{j,k}^{(i)}
+=
+\pi(K_j,T_{j,cw}\bar p_{w,k}^{(i)}).
+\]
+Thus the proposed PF uses Lie groups in both places: \(\SO(3)\) propagation and
+body-to-world acceleration mapping in prediction, and \(\SE(3)\) camera
+projection in measurement.
+
+\section{Conclusions}
+
+The study shows that Lie-group camera projection is the right mathematical
+language for multi-camera UAV tracking: it keeps camera extrinsics explicit and
+prevents frame-convention ambiguity.  In the implemented position/velocity
+tracking problem, the EKF-style filters are fastest and most accurate in
+nominal unimodal cases.  The PF is not the universal winner, but it is the
+natural estimator when the posterior is non-Gaussian or multimodal, as shown by
+the candidate-set experiment.  The hardware ablation supports the hypothesis
+that incorrect intrinsics and marker-frame/optical-frame extrinsic errors can
+explain multi-meter hardware PF errors.  The next technical step is a
+body-frame-acceleration Lie-group PF in which each particle carries latent
+attitude on \(\SO(3)\) or \(\SE_2(3)\), while the reported estimate remains the
+UAV trajectory.
+
+\appendix
+
+\section{Projection Jacobian}
+
+Let
+\[
+p_c=R_{cw}p_w+t_{cw}=
+\begin{bmatrix}X&Y&Z\end{bmatrix}^{\T}.
+\]
+For
+\[
+u=f_xX/Z+c_x,
+\qquad
+v=f_yY/Z+c_y,
+\]
+the projection derivative with respect to the camera-frame point is
+\[
+J_{\pi}
+=
+\begin{bmatrix}
+f_x/Z & 0 & -f_xX/Z^2\\
+0 & f_y/Z & -f_yY/Z^2
+\end{bmatrix}.
+\]
+Since \(\partial p_c/\partial p_w=R_{cw}\), the measurement Jacobian for the
+position/velocity state is
+\[
+H_k
+=
+\begin{bmatrix}
+J_{\pi}R_{cw} & 0_{2\times 3}
+\end{bmatrix}.
+\]
+
+\section{Iterated EKF Algorithm}
+
+Given \(\hat x^-_k\), \(P^-_k\), and stacked measurement \(z_k\), initialize
+\[
+\hat x_k^{(0)}=\hat x^-_k.
+\]
+At each iteration \(\ell\), compute
+\[
+\hat z_k^{(\ell)}=h(\hat x_k^{(\ell)}),
+\qquad
+H_k^{(\ell)}
+=
+\left.\frac{\partial h}{\partial x}\right|_{\hat x_k^{(\ell)}}.
+\]
+The residual corrected back to the predicted state is
+\[
+\tilde r_k^{(\ell)}
+=
+z_k-h(\hat x_k^{(\ell)})
++H_k^{(\ell)}
+(\hat x_k^{(\ell)}-\hat x^-_k).
+\]
+Then
+\[
+S_k^{(\ell)}
+=
+H_k^{(\ell)}P^-_kH_k^{(\ell)\T}+R_k,
+\]
+\[
+K_k^{(\ell)}
+=
+P^-_kH_k^{(\ell)\T}
+\left(S_k^{(\ell)}\right)^{-1},
+\]
+\[
+\hat x_k^{(\ell+1)}
+=
+\hat x^-_k+
+K_k^{(\ell)}\tilde r_k^{(\ell)}.
+\]
+The procedure stops after a fixed number of iterations or when the update
+change is below a tolerance.
+
+\section{Left-Invariant Error for the Proposed Lie-Group PF}
+
+The proposed \(\SE_2(3)\) PF does not need a left-invariant error to perform
+the particle update.  The PF propagates particles directly and updates weights
+by likelihood.  Nevertheless, a left-invariant error is useful for diagnostics
+and for describing particle spread on the group.
+
+Given a weighted group mean \(\bar X_k\), define the particle error
+\[
+\eta_k^{(i)}=\bar X_k^{-1}X_k^{(i)}.
+\]
+The tangent-space error is
+\[
+\epsilon_k^{(i)}
+=
+\Log\left(\bar X_k^{-1}X_k^{(i)}\right)^\vee.
+\]
+For \(\SE_2(3)\), this contains attitude, velocity, and position error
+coordinates:
+\[
+\epsilon_k^{(i)}
+\approx
+\begin{bmatrix}
+\delta\theta_k^{(i)}\\
+\delta v_{b,k}^{(i)}\\
+\delta p_{b,k}^{(i)}
+\end{bmatrix}.
+\]
+The \(b\) subscript means that errors are expressed in the body frame of the
+reference mean; the stored particle states are still \(v_w^{(i)}\) and
+\(p_w^{(i)}\).
+
+The local weighted Lie-group mean minimizes
+\[
+\bar X_k
+=
+\arg\min_Y
+\frac{1}{2}
+\sum_i w_k^{(i)}
+\left\|
+\Log(Y^{-1}X_k^{(i)})^\vee
+\right\|^2.
+\]
+Let
+\[
+\epsilon_i=
+\Log(\bar X_k^{-1}X_k^{(i)})^\vee.
+\]
+Perturb the mean by
+\[
+Y=\bar X_k\Exp(\delta^\wedge).
+\]
+Then
+\[
+Y^{-1}X_k^{(i)}
+=
+\Exp(-\delta^\wedge)\bar X_k^{-1}X_k^{(i)}.
+\]
+Using the first-order Baker-Campbell-Hausdorff approximation near the mean,
+\[
+\Log(Y^{-1}X_k^{(i)})^\vee
+\approx
+\epsilon_i-\delta.
+\]
+Thus the local cost becomes
+\[
+J(\delta)
+\approx
+\frac{1}{2}
+\sum_i w_k^{(i)}
+\|\epsilon_i-\delta\|^2.
+\]
+At the optimum, the derivative at \(\delta=0\) must vanish:
+\[
+\left.\frac{\partial J}{\partial \delta}\right|_{\delta=0}
+=
+-\sum_iw_k^{(i)}\epsilon_i
+=0.
+\]
+Therefore,
+\[
+\sum_i w_k^{(i)}
+\Log(\bar X_k^{-1}X_k^{(i)})^\vee
+\approx 0.
+\]
+This is the Lie-group analogue of the Euclidean fact that weighted errors
+around the mean sum to zero.
+
+\begin{thebibliography}{99}
+
+\bibitem{thrun2005}
+S. Thrun, W. Burgard, and D. Fox, \textit{Probabilistic Robotics}, MIT Press,
+Cambridge, MA, 2005.
+
+\bibitem{barrau2017}
+A. Barrau and S. Bonnabel, ``The Invariant Extended Kalman Filter as a Stable
+Observer,'' \textit{IEEE Transactions on Automatic Control}, Vol. 62, No. 4,
+2017, pp. 1797--1812.
+
+\bibitem{hartley2004}
+R. Hartley and A. Zisserman, \textit{Multiple View Geometry in Computer
+Vision}, 2nd ed., Cambridge University Press, Cambridge, UK, 2004.
+
+\bibitem{fpf_lg}
+C. Zhang, A. Taghvaei, and P. G. Mehta, ``Feedback Particle Filter on Matrix
+Lie Groups,'' arXiv:1701.02416, 2017.
+
+\bibitem{chahbazian2023}
+C. Chahbazian, \textit{Particle Filtering on Lie Groups: Application to
+Navigation}, Ph.D. thesis, Universite Paris-Saclay, 2023.
+
+\bibitem{yang2022}
+Z.-P. Yang, \textit{Unmanned Aerial System Tracking in Urban Canyon
+Environments Using External Vision Sensors}, M.S. thesis, Purdue University,
+2022.
+
+\end{thebibliography}
+
+\end{document}

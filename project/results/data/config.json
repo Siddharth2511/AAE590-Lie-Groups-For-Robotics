@@ -1,0 +1,14 @@
+{
+  "runs": 12,
+  "particles": 450,
+  "duration_s": 12.0,
+  "dt_s": 0.05,
+  "seed": 590,
+  "filters": [
+    "MEKF",
+    "ItEKF",
+    "MEKF-gated",
+    "ItEKF-gated",
+    "PF"
+  ]
+}
