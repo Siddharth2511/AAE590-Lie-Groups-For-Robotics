@@ -2,6 +2,8 @@
 
 Additional coursework for **Lie Group Methods for Estimation and Control**.
 
+Problem-set solution artifacts live in [`../solutions`](../solutions). This folder is for supporting Kalman filtering notebooks and EKF media from the broader course workspace.
+
 ## Kalman Filtering
 
 - `kalman_filtering/kf2_inclass.ipynb` - in-class Kalman filtering notebook

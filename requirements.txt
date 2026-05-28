@@ -3,3 +3,4 @@ matplotlib
 pillow
 opencv-python
 pyyaml
+rumoca

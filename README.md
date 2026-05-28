@@ -1,10 +1,15 @@
 # AAE 590 - Lie Group Methods for Estimation and Control
 
-Course portfolio for **Lie Group Methods for Estimation and Control**. This repository collects Kalman filtering notebooks, EKF visualizations, and a final project on Lie-group-aware multi-camera UAV tracking with particle filtering, EKF variants, hardware calibration studies, and result visualizations.
+Course portfolio for **Lie Group Methods for Estimation and Control**. This repository presents solution notebooks, Kalman/EKF experiments, and a final project on Lie-group-aware multi-camera UAV tracking with particle filtering, EKF variants, hardware calibration studies, and result visualizations.
+
+![Course](https://img.shields.io/badge/course-AAE%20590-1f6feb)
+![Focus](https://img.shields.io/badge/focus-Lie%20groups%20%7C%20estimation%20%7C%20control-2ea44f)
+![Tools](https://img.shields.io/badge/tools-Python%20%7C%20Jupyter%20%7C%20Modelica%20%7C%20RUMOCA-f97316)
+![Status](https://img.shields.io/badge/status-curated%20course%20portfolio-8250df)
 
 ## Highlights
 
-| Particle filter trajectory | Filter RMSE comparison |
+| Lie-group particle filter trajectory | Filter RMSE comparison |
 |---|---|
 | ![Trajectory top view](project/results/figures/trajectory_top_view.png) | ![RMSE comparison](project/results/figures/rmse_bar.png) |
 
@@ -12,11 +17,30 @@ Course portfolio for **Lie Group Methods for Estimation and Control**. This repo
 |---|---|
 | ![Hardware calibration ablation](project/results/figures/hardware_calibration_ablation_rmse.png) | ![PURT camera layout](project/results/figures/hardware_purt_camera_layout.png) |
 
-![Body-frame EKF animation](coursework/media/body_frame_ekf_animation.gif)
+| Body-frame EKF | RUMOCA unicycle comparison |
+|---|---|
+| ![Body-frame EKF animation](coursework/media/body_frame_ekf_animation.gif) | ![RUMOCA unicycle overlay](solutions/ps04/results/problem5_rumoca_overlay.png) |
+
+## What Is Inside
+
+| Area | Contents | Why it is here |
+|---|---|---|
+| [Problem-set solutions](solutions) | PS04 solution notebooks, Modelica model, RUMOCA comparison script, generated overlay | Shows my implemented solution work without redistributing Purdue prompt PDFs. |
+| [Coursework experiments](coursework) | Kalman filtering notebooks and EKF animations | Captures the estimation workflow built during the course. |
+| [Final project](project) | Particle filter, EKF baselines, papers, hardware notes, plots, and calibration analysis | Main polished research-style deliverable for the course. |
+
+## Problem-Set Solutions
+
+The `solutions/` folder contains my own solution artifacts where they are available. Course prompt PDFs and assignment handouts are intentionally excluded.
+
+- [PS04 solution workspace](solutions/ps04) - Jupyter notebooks for `SE(2)` and unicycle experiments
+- [Modelica unicycle model](solutions/ps04/modelica/Unicycle.mo)
+- [RUMOCA comparison script](solutions/ps04/modelica/problem5_rumoca_compare.py)
+- [Generated RUMOCA overlay](solutions/ps04/results/problem5_rumoca_overlay.png)
 
 ## Coursework
 
-The `coursework/` folder collects additional material from the local `Desktop/AAE590` course workspace:
+The `coursework/` folder collects additional material from the local course workspace:
 
 - Kalman filtering notebooks from in-class and homework experiments
 - EKF visualizations in world-frame and body-frame coordinates
@@ -68,6 +92,7 @@ Animations and media are included for quick review:
 ## Repository Layout
 
 ```text
+solutions/          Problem-set solution notebooks, code, and generated results
 coursework/         Kalman filtering notebooks and EKF media
 project/code/       Particle filter, EKF, projection, plotting, and hardware scripts
 project/paper/      Final reports and paper source
@@ -90,17 +115,20 @@ python ambiguous_candidate_case.py --out-dir ../../results
 
 Some hardware and ROS visualization scripts require ROS 2, `cv_bridge`, `rosbag2_py`, and camera-bag data that is not included in this repository.
 
+To run the PS04 solution notebooks, open the files in `solutions/ps04/notebooks/` with Jupyter. The RUMOCA comparison also expects the optional `rumoca` package and a working Modelica/RUMOCA setup.
+
 ## Included And Excluded
 
 Included:
 
+- Problem-set solution notebooks, source code, and generated solution figures
 - Kalman filtering notebooks and EKF visualizations from `Desktop/AAE590`
 - Final particle-filter project code
 - Final reports, result CSVs, plots, hardware images, and selected animations
 
 Excluded:
 
-- Course lecture slides, textbooks, and assignment/problem-statement material
+- Course lecture slides, textbooks, problem statement PDFs, prompt handouts, and assignment sheets
 - Python virtual environments, caches, LaTeX build artifacts, raw generated frame folders, and large duplicate exports
 - Raw ROS bags and heavyweight local hardware datasets
 
